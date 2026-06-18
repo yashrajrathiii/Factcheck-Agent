@@ -27,7 +27,7 @@ async function fetchWithRetry(
   options: any = {},
   timeoutMs = 15000,
   maxRetries = 3,
-  delayMs = 1500
+  delayMs = 2000
 ) {
   let res;
   let lastError;
@@ -35,16 +35,20 @@ async function fetchWithRetry(
     try {
       res = await fetchWithTimeout(url, options, timeoutMs);
       if (res.status === 429) {
-        console.warn(`Rate limit (429) hit on ${url}. Retrying in ${delayMs}ms... (Attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const jitter = Math.random() * 1000;
+        const sleepTime = delayMs + jitter;
+        console.warn(`Rate limit (429) hit on ${url}. Retrying in ${Math.round(sleepTime)}ms... (Attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise((resolve) => setTimeout(resolve, sleepTime));
         delayMs *= 2; // exponential backoff
         continue;
       }
       return res;
     } catch (err) {
-      console.warn(`Fetch error on ${url}: ${err}. Retrying in ${delayMs}ms... (Attempt ${attempt + 1}/${maxRetries})`);
+      const jitter = Math.random() * 1000;
+      const sleepTime = delayMs + jitter;
+      console.warn(`Fetch error on ${url}: ${err}. Retrying in ${Math.round(sleepTime)}ms... (Attempt ${attempt + 1}/${maxRetries})`);
       lastError = err;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await new Promise((resolve) => setTimeout(resolve, sleepTime));
       delayMs *= 2;
     }
   }
@@ -154,7 +158,7 @@ serve(async (req) => {
         console.log(`Using selected Gemini model: ${targetModel}`);
 
         // B. Extract claims using Gemini
-        const extractionPrompt = `Extract up to 10 distinct, factual claims (e.g. stats, dates, financials, technical specs) that can be verified from the following text. Catalog each claim and choose the most appropriate category tag (STAT, DATE, FINANCIAL, TECHNICAL). Return ONLY a JSON object matching this schema:
+        const extractionPrompt = `Extract up to 5 distinct, high-impact, factual claims (e.g. stats, dates, financials, technical specs) that can be verified from the following text. Catalog each claim and choose the most appropriate category tag (STAT, DATE, FINANCIAL, TECHNICAL). Return ONLY a JSON object matching this schema:
 {
   "claims": [
     {
@@ -398,12 +402,14 @@ Ensure the output is valid JSON.`;
           }
         };
 
-        // E. Process in batches of 2 concurrently to avoid timeouts and rate-limiting
-        const batchSize = 2;
-        for (let i = 0; i < insertedClaims.length; i += batchSize) {
-          const batch = insertedClaims.slice(i, i + batchSize);
-          console.log(`Processing batch of ${batch.length} claims...`);
-          await Promise.all(batch.map((claimRecord) => processClaim(claimRecord)));
+        // E. Process sequentially (concurrency of 1) with a 1-second delay to guarantee free-tier RPM limits are respected
+        for (let i = 0; i < insertedClaims.length; i++) {
+          const claimRecord = insertedClaims[i];
+          console.log(`Processing claim ${i + 1}/${insertedClaims.length}...`);
+          await processClaim(claimRecord);
+          if (i < insertedClaims.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
         }
 
         // F. Finish document processing successfully
