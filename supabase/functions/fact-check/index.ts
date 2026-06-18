@@ -258,158 +258,186 @@ ${documentText}
 
         console.log(`Successfully bulk inserted ${insertedClaims.length} claims. Processing...`);
 
-        // D. Helper to process a single claim record
-        const processClaim = async (claimRecord: any) => {
-          try {
-            // D1. Query Tavily search evidence with an 8-second timeout
-            console.log(`Searching web for: "${claimRecord.claim_text}"`);
-            const searchResults = await searchWeb(claimRecord.claim_text, tavilyApiKey);
+        // D. Gather Tavily search results for all claims concurrently (Tavily doesn't rate limit)
+        console.log(`Searching web for all ${insertedClaims.length} claims concurrently...`);
+        const searchResultsMap: Record<string, any[]> = {};
+        
+        await Promise.all(
+          insertedClaims.map(async (c: any) => {
+            try {
+              console.log(`Searching Tavily for claim: "${c.claim_text}"`);
+              const results = await searchWeb(c.claim_text, tavilyApiKey);
+              searchResultsMap[c.id] = results;
+            } catch (err) {
+              console.error(`Tavily search failed for claim "${c.claim_text}":`, err);
+              searchResultsMap[c.id] = [];
+            }
+          })
+        );
 
-            // D2. Evaluate evidence using Gemini
-            const evidenceText = searchResults
-              .map(
-                (r: any, idx: number) =>
-                  `${idx + 1}. URL: ${r.url}\nContent: ${r.content}`
-              )
-              .join("\n\n");
+        // E. Build a single unified evaluation prompt for Gemini
+        console.log("Building unified evaluation prompt for Gemini...");
+        const evaluationsPrompt = `You are a forensic fact-checking agent. Below are multiple claims to verify, along with their corresponding search engine results.
 
-            const evaluationPrompt = `Claim to verify: "${claimRecord.claim_text}"
-Claim type: ${claimRecord.claim_type}
-
-Below are the search engine results from the web for verification:
+${insertedClaims.map((c: any, idx: number) => {
+  const claimSearch = searchResultsMap[c.id] || [];
+  const evidenceText = claimSearch
+    .map((r: any, rIdx: number) => `${rIdx + 1}. URL: ${r.url}\nContent: ${r.content}`)
+    .join("\n\n");
+  return `Claim #${idx + 1}:
+ID: ${c.id}
+Text: "${c.claim_text}"
+Type: ${c.claim_type}
+Evidence:
 """
-${evidenceText || "No web results found."}
-"""
+${evidenceText || "No search results found."}
+"""`;
+}).join("\n\n---\n\n")}
 
-Evaluate if the claim is Verified, Inaccurate, or False based strictly on the search results.
+For each claim, evaluate if it is Verified, Inaccurate, or False based strictly on the search results.
 If there is no web evidence supporting or refuting the claim, verify it as "verified" if it is highly standard, or "inaccurate" / "false" if refuted. Be strict and forensic.
 Return ONLY a JSON object matching this schema:
 {
-  "verdict": "verified" | "inaccurate" | "false",
-  "reasoning": "Forensic proof/disproof explanation based on search results",
-  "correct_fact": "The true fact if inaccurate or false, else null",
-  "source_url": "The most relevant source URL from search results, or null",
-  "source_snippet": "The exact snippet from the source URL supporting your verdict, or null"
+  "evaluations": [
+    {
+      "claim_id": "string (the exact ID of the claim)",
+      "verdict": "verified" | "inaccurate" | "false",
+      "reasoning": "Forensic proof/disproof explanation based on search results",
+      "correct_fact": "The true fact if inaccurate or false, else null",
+      "source_url": "The most relevant source URL from search results, or null",
+      "source_snippet": "The exact snippet from the source URL supporting your verdict, or null"
+    }
+  ]
 }
 
-Ensure the output is valid JSON.`;
+Ensure the output is valid JSON and contains evaluations for all input claims.`;
 
-            // Call Gemini evaluation with a 12-second timeout using fetchWithRetry
-            const geminiEvalRes = await fetchWithRetry(
-              `https://generativelanguage.googleapis.com/v1beta/${targetModel}:generateContent?key=${geminiApiKey}`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  contents: [{ parts: [{ text: evaluationPrompt }] }],
-                  generationConfig: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                      type: "OBJECT",
-                      properties: {
-                        verdict: {
-                          type: "STRING",
-                          enum: ["verified", "inaccurate", "false"],
+        // F. Call Gemini evaluation ONCE using fetchWithRetry with a 25-second timeout
+        console.log("Calling Gemini evaluation API in a single batch request...");
+        const geminiEvalRes = await fetchWithRetry(
+          `https://generativelanguage.googleapis.com/v1beta/${targetModel}:generateContent?key=${geminiApiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: evaluationsPrompt }] }],
+              generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                  type: "OBJECT",
+                  properties: {
+                    evaluations: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          claim_id: { type: "STRING" },
+                          verdict: {
+                            type: "STRING",
+                            enum: ["verified", "inaccurate", "false"],
+                          },
+                          reasoning: { type: "STRING" },
+                          correct_fact: { type: "STRING" },
+                          source_url: { type: "STRING" },
+                          source_snippet: { type: "STRING" },
                         },
-                        reasoning: { type: "STRING" },
-                        correct_fact: { type: "STRING" },
-                        source_url: { type: "STRING" },
-                        source_snippet: { type: "STRING" },
+                        required: ["claim_id", "verdict", "reasoning"],
                       },
-                      required: ["verdict", "reasoning"],
                     },
                   },
-                }),
+                  required: ["evaluations"],
+                },
               },
-              12000
-            );
+            }),
+          },
+          25000
+        );
 
-            if (!geminiEvalRes.ok) {
-              throw new Error(`Gemini evaluation API returned status code ${geminiEvalRes.status}`);
-            }
+        if (!geminiEvalRes.ok) {
+          const errBody = await geminiEvalRes.text().catch(() => "");
+          throw new Error(`Gemini evaluation API returned status code ${geminiEvalRes.status}. Details: ${errBody}`);
+        }
 
-            const evalJson = await geminiEvalRes.json();
-            const textContent = evalJson?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (!textContent) {
-              throw new Error("Gemini evaluation returned an empty text response.");
-            }
+        const evalJson = await geminiEvalRes.json();
+        const textContent = evalJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!textContent) {
+          throw new Error("Gemini evaluation returned an empty text response.");
+        }
 
-            let evalDataResult;
-            try {
-              evalDataResult = JSON.parse(textContent);
-            } catch (e) {
-              console.error("Failed to parse evaluation JSON:", e);
-              throw new Error(`Failed to parse Gemini evaluation JSON: ${e.message}`);
-            }
+        let evalDataResult;
+        try {
+          evalDataResult = JSON.parse(textContent);
+        } catch (e) {
+          console.error("Failed to parse evaluations JSON:", e);
+          throw new Error(`Failed to parse Gemini evaluations JSON: ${e.message}`);
+        }
 
-            // String sanitization: normalize null/undefined/"null" values
-            const cleanString = (val: any) => {
-              if (val === null || val === undefined) return null;
-              const s = String(val).trim();
-              if (s.toLowerCase() === "null" || s === "") return null;
-              return s;
-            };
+        const evaluationsList = evalDataResult.evaluations || [];
+        console.log(`Received evaluations for ${evaluationsList.length} claims. Updating DB...`);
 
-            const verdict = cleanString(evalDataResult.verdict) || "verified";
-            const reasoning = cleanString(evalDataResult.reasoning) || "Verification complete.";
-            const correctFact = cleanString(evalDataResult.correct_fact);
-            const sourceUrl = cleanString(evalDataResult.source_url);
-            const sourceSnippet = cleanString(evalDataResult.source_snippet);
+        // G. Update database claim rows
+        const processedClaimIds = new Set<string>();
+        const cleanString = (val: any) => {
+          if (val === null || val === undefined) return null;
+          const s = String(val).trim();
+          if (s.toLowerCase() === "null" || s === "") return null;
+          return s;
+        };
 
-            // Update claim record in database
-            await supabase
-              .from("claims")
-              .update({
-                verdict,
-                reasoning,
-                correct_fact: correctFact,
-                source_url: sourceUrl,
-                source_snippet: sourceSnippet,
-              })
-              .eq("id", claimRecord.id);
+        for (const evalItem of evaluationsList) {
+          const verdict = cleanString(evalItem.verdict) || "verified";
+          const reasoning = cleanString(evalItem.reasoning) || "Verification complete.";
+          const correctFact = cleanString(evalItem.correct_fact);
+          const sourceUrl = cleanString(evalItem.source_url);
+          const sourceSnippet = cleanString(evalItem.source_snippet);
 
-            // Update progress document counts thread-safely by querying the database state
-            const { data: claimsInDoc, error: countsError } = await supabase
-              .from("claims")
-              .select("verdict")
-              .eq("document_id", documentId);
+          await supabase
+            .from("claims")
+            .update({
+              verdict,
+              reasoning,
+              correct_fact: correctFact,
+              source_url: sourceUrl,
+              source_snippet: sourceSnippet,
+            })
+            .eq("id", evalItem.claim_id);
 
-            if (!countsError && claimsInDoc) {
-              const verifiedCount = claimsInDoc.filter((c: any) => c.verdict === "verified").length;
-              const inaccurateCount = claimsInDoc.filter((c: any) => c.verdict === "inaccurate").length;
-              const falseCount = claimsInDoc.filter((c: any) => c.verdict === "false").length;
+          processedClaimIds.add(evalItem.claim_id);
+          console.log(`Updated claim ${evalItem.claim_id} to verdict: ${verdict}`);
+        }
 
-              await supabase
-                .from("documents")
-                .update({
-                  verified_count: verifiedCount,
-                  inaccurate_count: inaccurateCount,
-                  false_count: falseCount,
-                })
-                .eq("id", documentId);
-            }
-
-            console.log(`Claim ${claimRecord.id} verified as: ${verdict}`);
-          } catch (claimErr: any) {
-            console.error(`Error processing claim ${claimRecord?.id || "unknown"}:`, claimErr);
+        // Catch any claims that were not returned in the AI evaluations
+        for (const c of insertedClaims) {
+          if (!processedClaimIds.has(c.id)) {
             await supabase
               .from("claims")
               .update({
                 verdict: "error",
-                reasoning: `Verification process encountered an issue: ${claimErr?.message || "Timeout or internal API error."}`,
+                reasoning: "Claim was not evaluated by the AI verification agent."
               })
-              .eq("id", claimRecord.id);
+              .eq("id", c.id);
           }
-        };
+        }
 
-        // E. Process sequentially (concurrency of 1) with a 1-second delay to guarantee free-tier RPM limits are respected
-        for (let i = 0; i < insertedClaims.length; i++) {
-          const claimRecord = insertedClaims[i];
-          console.log(`Processing claim ${i + 1}/${insertedClaims.length}...`);
-          await processClaim(claimRecord);
-          if (i < insertedClaims.length - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-          }
+        // H. Update progress document counts thread-safely by querying the database state
+        const { data: claimsInDoc, error: countsError } = await supabase
+          .from("claims")
+          .select("verdict")
+          .eq("document_id", documentId);
+
+        if (!countsError && claimsInDoc) {
+          const verifiedCount = claimsInDoc.filter((c: any) => c.verdict === "verified").length;
+          const inaccurateCount = claimsInDoc.filter((c: any) => c.verdict === "inaccurate").length;
+          const falseCount = claimsInDoc.filter((c: any) => c.verdict === "false").length;
+
+          await supabase
+            .from("documents")
+            .update({
+              verified_count: verifiedCount,
+              inaccurate_count: inaccurateCount,
+              false_count: falseCount,
+            })
+            .eq("id", documentId);
         }
 
         // F. Finish document processing successfully
