@@ -1,0 +1,8 @@
+react@18.x
+react-dom@18.x
+@supabase/supabase-js@2.x
+pdfjs-dist@3.x
+lucide-react@latest
+tailwindcss@3.x
+vite@5.x
+typescript@5.x
