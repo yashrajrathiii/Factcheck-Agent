@@ -125,10 +125,13 @@ serve(async (req) => {
             const priorities = [
               "models/gemini-1.5-flash",
               "models/gemini-1.5-flash-latest",
+              "models/gemini-2.0-flash",
+              "models/gemini-2.0-flash-latest",
               "models/gemini-2.5-flash",
               "models/gemini-1.5-pro",
               "models/gemini-1.5-pro-latest",
-              "models/gemini-2.5-pro"
+              "models/gemini-2.5-pro",
+              "models/gemini-2.0-pro"
             ];
 
             let found = false;
