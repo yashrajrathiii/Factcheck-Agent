@@ -112,7 +112,7 @@ serve(async (req) => {
         console.log(`Starting background claims extraction for document ${documentId}...`);
 
         // A. Detect available v1beta models for this API key to auto-recover from 404 errors
-        let targetModel = "models/gemini-2.0-flash";
+        let targetModel = "models/gemini-3.1-flash-lite";
         try {
           const listRes = await fetchWithTimeout(
             `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiApiKey}`
@@ -123,6 +123,10 @@ serve(async (req) => {
             console.log("Available v1beta models:", availableModels);
             
             const priorities = [
+              "models/gemini-3.1-flash-lite",
+              "models/gemini-3.1-flash-lite-latest",
+              "models/gemini-2.5-flash-lite",
+              "models/gemini-2.5-flash-lite-latest",
               "models/gemini-1.5-flash",
               "models/gemini-1.5-flash-latest",
               "models/gemini-2.0-flash",
