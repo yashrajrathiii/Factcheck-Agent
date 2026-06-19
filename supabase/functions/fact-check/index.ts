@@ -165,7 +165,7 @@ serve(async (req) => {
         console.log(`Using selected Gemini model: ${targetModel}`);
 
         // B. Extract claims using Gemini
-        const extractionPrompt = `Extract up to 5 distinct, high-impact, factual claims (e.g. stats, dates, financials, technical specs) that can be verified from the following text. Catalog each claim and choose the most appropriate category tag (STAT, DATE, FINANCIAL, TECHNICAL). Return ONLY a JSON object matching this schema:
+        const extractionPrompt = `Extract up to 10 distinct, factual claims (e.g. stats, dates, financials, technical specs) that can be verified from the following text. Catalog each claim and choose the most appropriate category tag (STAT, DATE, FINANCIAL, TECHNICAL). Return ONLY a JSON object matching this schema:
 {
   "claims": [
     {
